@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from app.config import settings
 
 db_url = URL.create(
-    drivername="postgresql+psycopg2",
+    drivername="postgresql+psycopg",
     username=settings.db_user,
     password=settings.db_password,
     host=settings.db_host,

@@ -1,29 +1,95 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)
+
 from sqlalchemy import text
-from app.database import engine, Base
+
+from app.database import (
+    engine,
+    Base,
+)
+
 from app import models
-from app.routers import auth, pluggy, finance
 
-Base.metadata.create_all(bind=engine)
+from app.routers import (
+    auth,
+    pluggy,
+    finance,
+    investments,
+)
 
-app = FastAPI(title="Family Finance API")
+
+# =========================================================
+# BANCO
+# =========================================================
+
+Base.metadata.create_all(
+    bind=engine
+)
+
+
+# =========================================================
+# APP
+# =========================================================
+
+app = FastAPI(
+    title="Family Finance API"
+)
+
+
+# =========================================================
+# CORS
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # em produção, restrinja para o domínio real do app
+
+    allow_origins=["*"],
+
     allow_credentials=True,
+
     allow_methods=["*"],
+
     allow_headers=["*"],
 )
 
-app.include_router(auth.router)
-app.include_router(pluggy.router)
-app.include_router(finance.router)
 
+# =========================================================
+# ROTAS
+# =========================================================
+
+app.include_router(
+    auth.router
+)
+
+app.include_router(
+    pluggy.router
+)
+
+app.include_router(
+    finance.router
+)
+
+app.include_router(
+    investments.router
+)
+
+
+# =========================================================
+# HEALTH
+# =========================================================
 
 @app.get("/health")
 def health():
+
     with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    return {"status": "ok", "database": "connected"}
+        conn.execute(
+            text("SELECT 1")
+        )
+
+    return {
+        "status": "ok",
+        "database": "connected",
+    }
