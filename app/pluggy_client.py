@@ -5,6 +5,10 @@ from datetime import (
     timedelta,
     timezone,
 )
+from urllib.parse import (
+    urlparse,
+    parse_qs,
+)
 
 from app.config import settings
 
@@ -44,28 +48,18 @@ async def get_pluggy_api_key() -> str:
         response = await client.post(
             f"{PLUGGY_BASE_URL}/auth",
             json={
-                "clientId":
-                    settings.pluggy_client_id,
-                "clientSecret":
-                    settings.pluggy_client_secret,
+                "clientId": settings.pluggy_client_id,
+                "clientSecret": settings.pluggy_client_secret,
             },
         )
 
         response.raise_for_status()
-
         data = response.json()
 
-    _cached_api_key = data[
-        "apiKey"
-    ]
-
+    _cached_api_key = data["apiKey"]
     _cached_api_key_expires_at = (
-        datetime.now(
-            timezone.utc
-        )
-        + timedelta(
-            minutes=100
-        )
+        datetime.now(timezone.utc)
+        + timedelta(minutes=100)
     )
 
     return _cached_api_key
@@ -84,28 +78,17 @@ async def create_connect_token(
     do nosso aplicativo.
     """
 
-    api_key = (
-        await get_pluggy_api_key()
-    )
+    api_key = await get_pluggy_api_key()
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{PLUGGY_BASE_URL}/connect_token",
-            headers={
-                "X-API-KEY":
-                    api_key
-            },
-            json={
-                "clientUserId":
-                    client_user_id
-            },
+            headers={"X-API-KEY": api_key},
+            json={"clientUserId": client_user_id},
         )
 
         response.raise_for_status()
-
-        return response.json()[
-            "accessToken"
-        ]
+        return response.json()["accessToken"]
 
 
 # =========================================================
@@ -116,25 +99,17 @@ async def create_connect_token(
 async def fetch_item(
     item_id: str,
 ) -> dict:
-    """
-    Busca detalhes de um Item Pluggy.
-    """
+    """Busca detalhes de um Item Pluggy."""
 
-    api_key = (
-        await get_pluggy_api_key()
-    )
+    api_key = await get_pluggy_api_key()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/items/{item_id}",
-            headers={
-                "X-API-KEY":
-                    api_key
-            },
+            headers={"X-API-KEY": api_key},
         )
 
         response.raise_for_status()
-
         return response.json()
 
 
@@ -146,37 +121,64 @@ async def fetch_item(
 async def fetch_accounts(
     item_id: str,
 ) -> list[dict]:
-    """
-    Busca contas associadas a um Item.
-    """
+    """Busca contas associadas a um Item."""
 
-    api_key = (
-        await get_pluggy_api_key()
-    )
+    api_key = await get_pluggy_api_key()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/accounts",
-            headers={
-                "X-API-KEY":
-                    api_key
-            },
-            params={
-                "itemId":
-                    item_id
-            },
+            headers={"X-API-KEY": api_key},
+            params={"itemId": item_id},
         )
 
         response.raise_for_status()
-
-        return response.json()[
-            "results"
-        ]
+        return response.json()["results"]
 
 
 # =========================================================
 # TRANSAÇÕES
 # =========================================================
+
+
+def _extract_after_cursor(next_value) -> str | None:
+    """
+    Extrai o cursor `after` retornado pela paginação v2.
+
+    A API pode devolver `next` como URL/query string ou,
+    dependendo da resposta do conector, como o próprio cursor.
+    """
+
+    if not next_value:
+        return None
+
+    if isinstance(next_value, dict):
+        after = next_value.get("after")
+        return str(after) if after else None
+
+    value = str(next_value).strip()
+    if not value:
+        return None
+
+    if "after=" in value:
+        parsed = urlparse(value)
+        query = parse_qs(parsed.query)
+        values = query.get("after")
+
+        if values:
+            return values[0]
+
+        # fallback para query string sem URL completa
+        query = parse_qs(value.lstrip("?"))
+        values = query.get("after")
+        if values:
+            return values[0]
+
+    # Se `next` já for somente o cursor, usa diretamente.
+    if "?" not in value and "=" not in value:
+        return value
+
+    return None
 
 
 async def fetch_transactions(
@@ -187,134 +189,68 @@ async def fetch_transactions(
     """
     Busca transações usando a API v2 da Pluggy.
 
-    Por padrão buscamos até 12 meses de histórico.
-
-    Também tratamos paginação por cursor.
-
-    Parâmetros opcionais:
-    - date_from
-    - date_to
+    Por padrão buscamos até 12 meses de histórico e tratamos
+    corretamente a paginação pelo cursor `after`.
     """
 
-    api_key = (
-        await get_pluggy_api_key()
-    )
-
-    now = datetime.now(
-        timezone.utc
-    )
-
-    # =====================================================
-    # PERÍODO PADRÃO
-    # =====================================================
+    api_key = await get_pluggy_api_key()
+    now = datetime.now(timezone.utc)
 
     if date_to is None:
         date_to = now
 
     if date_from is None:
-        date_from = (
-            date_to
-            - timedelta(
-                days=365
-            )
-        )
-
-    # =====================================================
-    # NORMALIZA TIMEZONE
-    # =====================================================
+        date_from = date_to - timedelta(days=365)
 
     if date_from.tzinfo is None:
-        date_from = (
-            date_from.replace(
-                tzinfo=timezone.utc
-            )
-        )
+        date_from = date_from.replace(tzinfo=timezone.utc)
 
     if date_to.tzinfo is None:
-        date_to = (
-            date_to.replace(
-                tzinfo=timezone.utc
-            )
-        )
-
-    # =====================================================
-    # PARAMS
-    # =====================================================
+        date_to = date_to.replace(tzinfo=timezone.utc)
 
     params = {
-        "accountId":
-            account_id,
-
-        "dateFrom":
-            date_from
-            .date()
-            .isoformat(),
-
-        "dateTo":
-            date_to
-            .date()
-            .isoformat(),
-
-        "pageSize":
-            500,
+        "accountId": account_id,
+        "dateFrom": date_from.date().isoformat(),
+        "dateTo": date_to.date().isoformat(),
+        "pageSize": 500,
     }
 
-    all_transactions = []
+    all_transactions: list[dict] = []
+    after: str | None = None
+    seen_cursors: set[str] = set()
 
-    cursor = None
-
-    async with httpx.AsyncClient() as client:
-
+    async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
+            current_params = dict(params)
 
-            current_params = dict(
-                params
-            )
-
-            if cursor:
-                current_params[
-                    "cursor"
-                ] = cursor
+            if after:
+                current_params["after"] = after
 
             response = await client.get(
                 f"{PLUGGY_BASE_URL}/v2/transactions",
-                headers={
-                    "X-API-KEY":
-                        api_key
-                },
-                params=
-                    current_params,
+                headers={"X-API-KEY": api_key},
+                params=current_params,
             )
 
             response.raise_for_status()
-
             data = response.json()
 
-            # =================================================
-            # RESULTADOS
-            # =================================================
+            results = data.get("results") or []
+            all_transactions.extend(results)
 
-            results = (
-                data.get(
-                    "results"
-                )
-                or []
+            next_after = _extract_after_cursor(
+                data.get("next")
             )
 
-            all_transactions.extend(
-                results
-            )
-
-            # =================================================
-            # PRÓXIMO CURSOR
-            # =================================================
-
-            cursor = data.get(
-                "next"
-            )
-
-            if not cursor:
+            if not next_after:
                 break
+
+            # Proteção contra loop em resposta inconsistente.
+            if next_after in seen_cursors:
+                break
+
+            seen_cursors.add(next_after)
+            after = next_after
 
     return all_transactions
 
@@ -327,29 +263,16 @@ async def fetch_transactions(
 async def fetch_investments(
     item_id: str,
 ) -> list[dict]:
-    """
-    Busca investimentos associados a um Item.
-    """
+    """Busca investimentos associados a um Item."""
 
-    api_key = (
-        await get_pluggy_api_key()
-    )
+    api_key = await get_pluggy_api_key()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/investments",
-            headers={
-                "X-API-KEY":
-                    api_key
-            },
-            params={
-                "itemId":
-                    item_id
-            },
+            headers={"X-API-KEY": api_key},
+            params={"itemId": item_id},
         )
 
         response.raise_for_status()
-
-        return response.json()[
-            "results"
-        ]
+        return response.json()["results"]
