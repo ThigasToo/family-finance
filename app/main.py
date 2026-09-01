@@ -18,6 +18,7 @@ from app.routers import (
     pluggy,
     finance,
     investments,
+    monthly_breakdown,
 )
 
 
@@ -74,6 +75,10 @@ app.include_router(
 
 app.include_router(
     investments.router
+)
+
+app.include_router(
+    monthly_breakdown.router
 )
 
 
