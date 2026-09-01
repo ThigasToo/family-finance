@@ -48,7 +48,12 @@ def _belongs_to_item(record: dict, item: PluggyItem) -> bool:
     if tagged_item:
         return str(tagged_item) == str(item.item_id)
 
-    # Compatibilidade com snapshots antigos, anteriores à marcação por item.
+    for key in ("itemId", "item_id", "connectorItemId"):
+        raw_item = record.get(key)
+        if raw_item:
+            return str(raw_item) == str(item.item_id)
+
+    # Compatibilidade final com snapshots antigos que não guardavam itemId.
     expected = normalize_institution_name(item.institution_name)
     actual = _record_institution(record)
     return bool(expected and actual and expected == actual)
@@ -228,24 +233,18 @@ async def sync_pluggy_item_snapshot(
         "investments": kept_investments + investments,
     }
 
+    retryable_time = now - timedelta(minutes=COOLDOWN_MINUTES)
+
     if snapshot is None:
-        # Se a Pluggy estiver parcialmente indisponível, não bloqueamos uma
-        # tentativa manual de refresh logo após a conexão.
-        snapshot_time = (
-            now
-            if complete
-            else now - timedelta(minutes=COOLDOWN_MINUTES)
-        )
         snapshot = FinancialSnapshot(
             user_id=user_id,
             payload=payload,
-            updated_at=snapshot_time,
+            updated_at=now if complete else retryable_time,
         )
         db.add(snapshot)
     else:
         snapshot.payload = payload
-        if complete:
-            snapshot.updated_at = now
+        snapshot.updated_at = now if complete else retryable_time
 
     db.commit()
     return {
@@ -316,21 +315,18 @@ async def refresh_finance(
         "investments": all_investments,
     }
 
+    retryable_time = now - timedelta(minutes=COOLDOWN_MINUTES)
+
     if snapshot is None:
         snapshot = FinancialSnapshot(
             user_id=current_user.id,
             payload=payload,
-            updated_at=(
-                now
-                if complete
-                else now - timedelta(minutes=COOLDOWN_MINUTES)
-            ),
+            updated_at=now if complete else retryable_time,
         )
         db.add(snapshot)
     else:
         snapshot.payload = payload
-        if complete:
-            snapshot.updated_at = now
+        snapshot.updated_at = now if complete else retryable_time
 
     db.commit()
 
