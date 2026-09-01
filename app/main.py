@@ -1,22 +1,14 @@
 from fastapi import FastAPI
 
-from fastapi.middleware.cors import (
-    CORSMiddleware,
-)
-
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.database import (
-    engine,
-    Base,
-)
-
+from app.database import Base, engine
 from app import models
-
 from app.routers import (
     auth,
     pluggy,
-    finance,
+    finance_stable,
     investments,
     monthly_breakdown,
     monthly_totals,
@@ -25,89 +17,32 @@ from app.routers import (
 )
 
 
-# =========================================================
-# BANCO
-# =========================================================
+Base.metadata.create_all(bind=engine)
 
-Base.metadata.create_all(
-    bind=engine
-)
-
-
-# =========================================================
-# APP
-# =========================================================
-
-app = FastAPI(
-    title="Family Finance API"
-)
-
-
-# =========================================================
-# CORS
-# =========================================================
+app = FastAPI(title="Family Finance API")
 
 app.add_middleware(
     CORSMiddleware,
-
     allow_origins=["*"],
-
     allow_credentials=True,
-
     allow_methods=["*"],
-
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+app.include_router(pluggy.router)
+app.include_router(finance_stable.router)
+app.include_router(investments.router)
+app.include_router(monthly_breakdown.router)
+app.include_router(monthly_totals.router)
+app.include_router(investment_transactions.router)
+app.include_router(manual_commitments.router)
 
-# =========================================================
-# ROTAS
-# =========================================================
-
-app.include_router(
-    auth.router
-)
-
-app.include_router(
-    pluggy.router
-)
-
-app.include_router(
-    finance.router
-)
-
-app.include_router(
-    investments.router
-)
-
-app.include_router(
-    monthly_breakdown.router
-)
-
-app.include_router(
-    monthly_totals.router
-)
-
-app.include_router(
-    investment_transactions.router
-)
-
-app.include_router(
-    manual_commitments.router
-)
-
-
-# =========================================================
-# HEALTH
-# =========================================================
 
 @app.get("/health")
 def health():
-
     with engine.connect() as conn:
-        conn.execute(
-            text("SELECT 1")
-        )
+        conn.execute(text("SELECT 1"))
 
     return {
         "status": "ok",
