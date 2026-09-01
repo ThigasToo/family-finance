@@ -1,50 +1,30 @@
-import httpx
+from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
-from datetime import (
-    datetime,
-    timedelta,
-    timezone,
-)
-from urllib.parse import (
-    urlparse,
-    parse_qs,
-)
+import httpx
 
 from app.config import settings
 
 
 PLUGGY_BASE_URL = "https://api.pluggy.ai"
-
+REQUEST_TIMEOUT = 60.0
 
 _cached_api_key: str | None = None
 _cached_api_key_expires_at: datetime | None = None
 
 
-# =========================================================
-# AUTH
-# =========================================================
-
-
 async def get_pluggy_api_key() -> str:
-    """
-    Retorna um apiKey válido da Pluggy.
-
-    O apiKey dura aproximadamente 2 horas.
-    Reutilizamos o token e renovamos antes do vencimento.
-    """
-
     global _cached_api_key
     global _cached_api_key_expires_at
 
     if (
         _cached_api_key
         and _cached_api_key_expires_at
-        and datetime.now(timezone.utc)
-        < _cached_api_key_expires_at
+        and datetime.now(timezone.utc) < _cached_api_key_expires_at
     ):
         return _cached_api_key
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.post(
             f"{PLUGGY_BASE_URL}/auth",
             json={
@@ -52,120 +32,55 @@ async def get_pluggy_api_key() -> str:
                 "clientSecret": settings.pluggy_client_secret,
             },
         )
-
         response.raise_for_status()
         data = response.json()
 
     _cached_api_key = data["apiKey"]
-    _cached_api_key_expires_at = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=100)
+    _cached_api_key_expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=100
     )
-
     return _cached_api_key
 
 
-# =========================================================
-# CONNECT TOKEN
-# =========================================================
-
-
-async def create_connect_token(
-    client_user_id: str,
-) -> str:
-    """
-    Gera connectToken vinculado ao usuário
-    do nosso aplicativo.
-    """
-
+async def create_connect_token(client_user_id: str) -> str:
     api_key = await get_pluggy_api_key()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.post(
             f"{PLUGGY_BASE_URL}/connect_token",
             headers={"X-API-KEY": api_key},
             json={"clientUserId": client_user_id},
         )
-
         response.raise_for_status()
         return response.json()["accessToken"]
 
 
-# =========================================================
-# ITEM
-# =========================================================
-
-
-async def fetch_item(
-    item_id: str,
-) -> dict:
-    """Busca detalhes de um Item Pluggy."""
-
+async def fetch_item(item_id: str) -> dict:
     api_key = await get_pluggy_api_key()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/items/{item_id}",
             headers={"X-API-KEY": api_key},
         )
-
         response.raise_for_status()
         return response.json()
 
 
-# =========================================================
-# CONTAS
-# =========================================================
-
-
-async def fetch_accounts(
-    item_id: str,
-) -> list[dict]:
-    """Busca contas associadas a um Item."""
-
+async def fetch_accounts(item_id: str) -> list[dict]:
     api_key = await get_pluggy_api_key()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/accounts",
             headers={"X-API-KEY": api_key},
             params={"itemId": item_id},
         )
-
         response.raise_for_status()
-        accounts = response.json()["results"]
-
-    print("\n========== PLUGGY ACCOUNTS ==========")
-    print(f"ITEM ID: {item_id}")
-    print(f"CONTAS RETORNADAS: {len(accounts)}")
-
-    for account in accounts:
-        print("---------- CONTA ENCONTRADA ----------")
-        print(f"ID: {account.get('id')}")
-        print(f"NOME: {account.get('name')}")
-        print(f"MARKETING NAME: {account.get('marketingName')}")
-        print(f"TIPO: {account.get('type')}")
-        print(f"SUBTIPO: {account.get('subtype')}")
-        print("--------------------------------------")
-
-    print("======================================\n")
-
-    return accounts
-
-
-# =========================================================
-# TRANSAÇÕES
-# =========================================================
+        return response.json().get("results") or []
 
 
 def _extract_after_cursor(next_value) -> str | None:
-    """
-    Extrai o cursor `after` retornado pela paginação v2.
-
-    A API pode devolver `next` como URL/query string ou,
-    dependendo da resposta do conector, como o próprio cursor.
-    """
-
     if not next_value:
         return None
 
@@ -179,19 +94,14 @@ def _extract_after_cursor(next_value) -> str | None:
 
     if "after=" in value:
         parsed = urlparse(value)
-        query = parse_qs(parsed.query)
-        values = query.get("after")
-
+        values = parse_qs(parsed.query).get("after")
         if values:
             return values[0]
 
-        # fallback para query string sem URL completa
-        query = parse_qs(value.lstrip("?"))
-        values = query.get("after")
+        values = parse_qs(value.lstrip("?")).get("after")
         if values:
             return values[0]
 
-    # Se `next` já for somente o cursor, usa diretamente.
     if "?" not in value and "=" not in value:
         return value
 
@@ -203,25 +113,16 @@ async def fetch_transactions(
     date_from: datetime | None = None,
     date_to: datetime | None = None,
 ) -> list[dict]:
-    """
-    Busca transações usando a API v2 da Pluggy.
-
-    Por padrão buscamos até 12 meses de histórico e tratamos
-    corretamente a paginação pelo cursor `after`.
-    """
-
     api_key = await get_pluggy_api_key()
     now = datetime.now(timezone.utc)
 
     if date_to is None:
         date_to = now
-
     if date_from is None:
         date_from = date_to - timedelta(days=365)
 
     if date_from.tzinfo is None:
         date_from = date_from.replace(tzinfo=timezone.utc)
-
     if date_to.tzinfo is None:
         date_to = date_to.replace(tzinfo=timezone.utc)
 
@@ -234,18 +135,10 @@ async def fetch_transactions(
     all_transactions: list[dict] = []
     after: str | None = None
     seen_cursors: set[str] = set()
-    page_number = 0
 
-    print("\n========== PLUGGY TRANSACTIONS ==========")
-    print(f"ACCOUNT ID: {account_id}")
-    print(f"DATE FROM: {params['dateFrom']}")
-    print(f"DATE TO: {params['dateTo']}")
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         while True:
-            page_number += 1
             current_params = dict(params)
-
             if after:
                 current_params["after"] = after
 
@@ -254,82 +147,34 @@ async def fetch_transactions(
                 headers={"X-API-KEY": api_key},
                 params=current_params,
             )
-
-            print(f"PÁGINA: {page_number}")
-            print(f"STATUS: {response.status_code}")
-            print(f"URL: {response.request.url}")
-
             response.raise_for_status()
             data = response.json()
 
             results = data.get("results") or []
-            all_transactions.extend(results)
-
-            print(f"RESULTADOS NESTA PÁGINA: {len(results)}")
-            print(f"NEXT: {data.get('next')}")
-
-            if results:
-                first = results[0]
-                print("PRIMEIRA TRANSAÇÃO (RESUMO):")
-                print(
-                    {
-                        "id": first.get("id"),
-                        "description": first.get("description"),
-                        "descriptionRaw": first.get("descriptionRaw"),
-                        "amount": first.get("amount"),
-                        "date": first.get("date"),
-                        "type": first.get("type"),
-                        "category": first.get("category"),
-                        "creditCardMetadata": first.get(
-                            "creditCardMetadata"
-                        ),
-                    }
-                )
-            else:
-                print("NENHUMA TRANSAÇÃO RETORNADA NESTA PÁGINA")
-
-            next_after = _extract_after_cursor(
-                data.get("next")
+            all_transactions.extend(
+                transaction
+                for transaction in results
+                if isinstance(transaction, dict)
             )
 
-            if not next_after:
-                break
-
-            # Proteção contra loop em resposta inconsistente.
-            if next_after in seen_cursors:
-                print(
-                    "CURSOR REPETIDO; PAGINAÇÃO INTERROMPIDA: "
-                    f"{next_after}"
-                )
+            next_after = _extract_after_cursor(data.get("next"))
+            if not next_after or next_after in seen_cursors:
                 break
 
             seen_cursors.add(next_after)
             after = next_after
 
-    print(f"TOTAL DE TRANSAÇÕES: {len(all_transactions)}")
-    print("=========================================\n")
-
     return all_transactions
 
 
-# =========================================================
-# INVESTIMENTOS
-# =========================================================
-
-
-async def fetch_investments(
-    item_id: str,
-) -> list[dict]:
-    """Busca investimentos associados a um Item."""
-
+async def fetch_investments(item_id: str) -> list[dict]:
     api_key = await get_pluggy_api_key()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/investments",
             headers={"X-API-KEY": api_key},
             params={"itemId": item_id},
         )
-
         response.raise_for_status()
-        return response.json()["results"]
+        return response.json().get("results") or []
