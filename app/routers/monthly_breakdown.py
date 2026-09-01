@@ -8,10 +8,9 @@ from app.database import get_db
 from app.models import FinancialSnapshot, User
 from app.security import get_current_user
 from app.routers.finance import (
-    get_credit_card_month_key,
     is_credit_card_purchase,
-    is_pix_sent,
-    month_key_from_datetime,
+    is_outflow_transaction,
+    is_pix_transaction,
     normalize_text,
     parse_transaction_date,
     resolve_account_institution,
@@ -23,6 +22,8 @@ router = APIRouter(
     prefix="/finance",
     tags=["finance"],
 )
+
+BILLING_CYCLE_DAY = 5
 
 
 def _validate_month(month: str) -> str:
@@ -76,6 +77,46 @@ def _transaction_date_iso(transaction: dict) -> str | None:
     return parsed.isoformat()
 
 
+def _month_key(year: int, month: int) -> str:
+    return f"{year}-{month:02d}"
+
+
+def _previous_month(value: datetime) -> tuple[int, int]:
+    if value.month == 1:
+        return value.year - 1, 12
+    return value.year, value.month - 1
+
+
+def _credit_card_cycle_month(transaction: dict) -> str | None:
+    """Classifica a compra pelo ciclo fixo de fechamento no dia 5.
+
+    Uma fatura YYYY-MM contém transações em:
+    dia 5 de YYYY-MM (inclusive) até dia 5 do mês seguinte (exclusivo).
+
+    Exemplos:
+    - 04/08/2026 -> ciclo 2026-07
+    - 05/08/2026 -> ciclo 2026-08
+    - 04/09/2026 -> ciclo 2026-08
+    - 05/09/2026 -> ciclo 2026-09
+
+    A classificação usa a data real da transação e ignora dueDate,
+    billDate e billForecastDate, pois esses campos podem representar
+    vencimento/fatura e deslocar compras antigas para outro mês.
+    """
+    transaction_date = parse_transaction_date(transaction)
+    if transaction_date is None:
+        return None
+
+    if transaction_date.day >= BILLING_CYCLE_DAY:
+        return _month_key(
+            transaction_date.year,
+            transaction_date.month,
+        )
+
+    year, month = _previous_month(transaction_date)
+    return _month_key(year, month)
+
+
 def _extract_installment(transaction: dict) -> dict:
     metadata = transaction.get("creditCardMetadata") or {}
     if not isinstance(metadata, dict):
@@ -118,6 +159,7 @@ def _extract_installment(transaction: dict) -> dict:
 
 
 def build_pix_breakdown(accounts: list, month: str) -> list[dict]:
+    """Retorna todos os PIX do mês-calendário, entradas e saídas."""
     items: list[dict] = []
 
     for account in accounts:
@@ -132,22 +174,38 @@ def build_pix_breakdown(accounts: list, month: str) -> list[dict]:
         for transaction in account.get("transactions") or []:
             if not isinstance(transaction, dict):
                 continue
-            if not is_pix_sent(transaction):
+            if not is_pix_transaction(transaction):
                 continue
 
             transaction_date = parse_transaction_date(transaction)
             if transaction_date is None:
                 continue
-            if month_key_from_datetime(transaction_date) != month:
+
+            transaction_month = _month_key(
+                transaction_date.year,
+                transaction_date.month,
+            )
+            if transaction_month != month:
                 continue
 
             amount = transaction_amount_abs(transaction)
             if amount <= 0:
                 continue
 
+            is_outflow = is_outflow_transaction(transaction)
+            direction = "OUT" if is_outflow else "IN"
+
             payment_data = transaction.get("paymentData") or {}
             if not isinstance(payment_data, dict):
                 payment_data = {}
+
+            counterparty = _first_non_empty(
+                payment_data.get("receiverName") if is_outflow else None,
+                payment_data.get("payerName") if not is_outflow else None,
+                payment_data.get("receiverName"),
+                payment_data.get("payerName"),
+                transaction.get("counterpartyName"),
+            )
 
             items.append(
                 {
@@ -157,17 +215,21 @@ def build_pix_breakdown(accounts: list, month: str) -> list[dict]:
                     "account_name": _account_display_name(account),
                     "description": _transaction_description(transaction),
                     "amount": round(amount, 2),
+                    "signed_amount": round(
+                        -amount if is_outflow else amount,
+                        2,
+                    ),
+                    "direction": direction,
                     "date": _transaction_date_iso(transaction),
                     "category": transaction.get("category"),
-                    "counterparty": _first_non_empty(
-                        payment_data.get("receiverName"),
-                        payment_data.get("payerName"),
-                        transaction.get("counterpartyName"),
-                    ),
+                    "counterparty": counterparty,
                 }
             )
 
-    items.sort(key=lambda item: item.get("date") or "")
+    items.sort(
+        key=lambda item: item.get("date") or "",
+        reverse=True,
+    )
     return items
 
 
@@ -191,7 +253,7 @@ def build_credit_card_breakdown(
                 continue
             if not is_credit_card_purchase(transaction):
                 continue
-            if get_credit_card_month_key(transaction) != month:
+            if _credit_card_cycle_month(transaction) != month:
                 continue
 
             amount = transaction_amount_abs(transaction)
@@ -214,6 +276,7 @@ def build_credit_card_breakdown(
                     "amount": round(amount, 2),
                     "date": _transaction_date_iso(transaction),
                     "competence_month": month,
+                    "billing_cycle_day": BILLING_CYCLE_DAY,
                     "bill_forecast_date": metadata.get("billForecastDate"),
                     "bill_date": metadata.get("billDate"),
                     "due_date": metadata.get("dueDate"),
@@ -222,7 +285,10 @@ def build_credit_card_breakdown(
                 }
             )
 
-    items.sort(key=lambda item: item.get("date") or "")
+    items.sort(
+        key=lambda item: item.get("date") or "",
+        reverse=True,
+    )
     return items
 
 
@@ -250,10 +316,34 @@ def get_monthly_breakdown(
     pix_items = build_pix_breakdown(accounts, month)
     card_items = build_credit_card_breakdown(accounts, month)
 
-    pix_total = round(
-        sum(float(item["amount"]) for item in pix_items),
+    pix_sent_total = round(
+        sum(
+            float(item["amount"])
+            for item in pix_items
+            if item.get("direction") == "OUT"
+        ),
         2,
     )
+    pix_received_total = round(
+        sum(
+            float(item["amount"])
+            for item in pix_items
+            if item.get("direction") == "IN"
+        ),
+        2,
+    )
+    pix_net = round(
+        pix_received_total - pix_sent_total,
+        2,
+    )
+
+    pix_sent_count = sum(
+        1 for item in pix_items if item.get("direction") == "OUT"
+    )
+    pix_received_count = sum(
+        1 for item in pix_items if item.get("direction") == "IN"
+    )
+
     card_total = round(
         sum(float(item["amount"]) for item in card_items),
         2,
@@ -264,14 +354,22 @@ def get_monthly_breakdown(
         "credit_cards": {
             "total": card_total,
             "count": len(card_items),
+            "billing_cycle_day": BILLING_CYCLE_DAY,
             "items": card_items,
         },
         "pix": {
-            "total": pix_total,
+            # Mantido para compatibilidade com o app atual.
+            "total": pix_sent_total,
+            "sent_total": pix_sent_total,
+            "received_total": pix_received_total,
+            "net": pix_net,
             "count": len(pix_items),
+            "sent_count": pix_sent_count,
+            "received_count": pix_received_count,
             "items": pix_items,
         },
-        "total_committed": round(card_total + pix_total, 2),
+        # O comprometimento continua considerando apenas saídas PIX.
+        "total_committed": round(card_total + pix_sent_total, 2),
         "updated_at": (
             snapshot.updated_at.isoformat()
             if snapshot and snapshot.updated_at
