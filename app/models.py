@@ -6,6 +6,7 @@ from sqlalchemy import (
     ForeignKey,
     JSON,
     Numeric,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -150,6 +151,51 @@ class FinancialSnapshot(Base):
     owner = relationship(
         "User",
         back_populates="snapshot",
+    )
+
+
+class MonthlyManualCommitment(Base):
+    """Valor informado manualmente para comprometer o caixa de um mês."""
+
+    __tablename__ = "monthly_manual_commitments"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "month",
+            name="uq_monthly_manual_commitment_user_month",
+        ),
+    )
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    month = Column(
+        String(7),
+        nullable=False,
+        index=True,
+    )
+
+    amount = Column(
+        Numeric(18, 2),
+        nullable=False,
+        default=0,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )
 
 
