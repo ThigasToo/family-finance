@@ -1,5 +1,6 @@
+from calendar import monthrange
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -25,8 +26,6 @@ router = APIRouter(
     tags=["finance"],
 )
 
-BILLING_CYCLE_DAY = 5
-
 
 def _validate_month(month: str) -> str:
     try:
@@ -38,6 +37,46 @@ def _validate_month(month: str) -> str:
         ) from exc
 
     return f"{parsed.year}-{parsed.month:02d}"
+
+
+def _month_date_range(month: str) -> tuple[date, date]:
+    parsed = datetime.strptime(month, "%Y-%m")
+    last_day = monthrange(parsed.year, parsed.month)[1]
+    return (
+        date(parsed.year, parsed.month, 1),
+        date(parsed.year, parsed.month, last_day),
+    )
+
+
+def _parse_filter_date(value: str | None, field: str) -> date | None:
+    if value is None:
+        return None
+
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"O parâmetro {field} deve estar no formato YYYY-MM-DD",
+        ) from exc
+
+
+def _resolve_card_date_range(
+    month: str,
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[date, date]:
+    default_from, default_to = _month_date_range(month)
+    resolved_from = _parse_filter_date(date_from, "date_from") or default_from
+    resolved_to = _parse_filter_date(date_to, "date_to") or default_to
+
+    if resolved_from > resolved_to:
+        raise HTTPException(
+            status_code=422,
+            detail="date_from não pode ser posterior a date_to",
+        )
+
+    return resolved_from, resolved_to
 
 
 def _first_non_empty(*values):
@@ -81,27 +120,6 @@ def _transaction_date_iso(transaction: dict) -> str | None:
 
 def _month_key(year: int, month: int) -> str:
     return f"{year}-{month:02d}"
-
-
-def _previous_month(value: datetime) -> tuple[int, int]:
-    if value.month == 1:
-        return value.year - 1, 12
-    return value.year, value.month - 1
-
-
-def _credit_card_cycle_month(transaction: dict) -> str | None:
-    transaction_date = parse_transaction_date(transaction)
-    if transaction_date is None:
-        return None
-
-    if transaction_date.day >= BILLING_CYCLE_DAY:
-        return _month_key(
-            transaction_date.year,
-            transaction_date.month,
-        )
-
-    year, month = _previous_month(transaction_date)
-    return _month_key(year, month)
 
 
 def _extract_installment(transaction: dict) -> dict:
@@ -221,7 +239,8 @@ def build_pix_breakdown(accounts: list, month: str) -> list[dict]:
 
 def build_credit_card_breakdown(
     accounts: list,
-    month: str,
+    date_from: date,
+    date_to: date,
 ) -> list[dict]:
     items: list[dict] = []
 
@@ -239,7 +258,13 @@ def build_credit_card_breakdown(
                 continue
             if not is_credit_card_purchase(transaction):
                 continue
-            if _credit_card_cycle_month(transaction) != month:
+
+            transaction_date = parse_transaction_date(transaction)
+            if transaction_date is None:
+                continue
+
+            transaction_day = transaction_date.date()
+            if transaction_day < date_from or transaction_day > date_to:
                 continue
 
             amount = transaction_amount_abs(transaction)
@@ -260,9 +285,11 @@ def build_credit_card_breakdown(
                     "card_name": _account_display_name(account),
                     "description": _transaction_description(transaction),
                     "amount": round(amount, 2),
-                    "date": _transaction_date_iso(transaction),
-                    "competence_month": month,
-                    "billing_cycle_day": BILLING_CYCLE_DAY,
+                    "date": transaction_date.isoformat(),
+                    "transaction_month": _month_key(
+                        transaction_date.year,
+                        transaction_date.month,
+                    ),
                     "bill_forecast_date": metadata.get("billForecastDate"),
                     "bill_date": metadata.get("billDate"),
                     "due_date": metadata.get("dueDate"),
@@ -282,13 +309,26 @@ def build_credit_card_breakdown(
 async def get_monthly_breakdown(
     month: str = Query(
         ...,
-        description="Competência no formato YYYY-MM",
+        description="Mês de referência no formato YYYY-MM",
         examples=["2026-09"],
+    ),
+    date_from: str | None = Query(
+        None,
+        description="Data inicial opcional dos cartões no formato YYYY-MM-DD",
+    ),
+    date_to: str | None = Query(
+        None,
+        description="Data final opcional dos cartões no formato YYYY-MM-DD",
     ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     month = _validate_month(month)
+    card_date_from, card_date_to = _resolve_card_date_range(
+        month,
+        date_from,
+        date_to,
+    )
 
     snapshot = (
         db.query(FinancialSnapshot)
@@ -307,7 +347,11 @@ async def get_monthly_breakdown(
         db.commit()
 
     raw_pix_items = build_pix_breakdown(accounts, month)
-    card_items = build_credit_card_breakdown(accounts, month)
+    card_items = build_credit_card_breakdown(
+        accounts,
+        card_date_from,
+        card_date_to,
+    )
     cash_flow = build_monthly_cash_flow(
         accounts,
         investments,
@@ -350,11 +394,10 @@ async def get_monthly_breakdown(
         "credit_cards": {
             "total": card_total,
             "count": len(card_items),
-            "billing_cycle_day": BILLING_CYCLE_DAY,
+            "date_from": card_date_from.isoformat(),
+            "date_to": card_date_to.isoformat(),
             "items": card_items,
         },
-        # Mantemos a chave pix para compatibilidade com a tela atual,
-        # mas agora ela representa o fluxo de caixa classificado.
         "pix": {
             "total": cash_sent,
             "sent_total": cash_sent,

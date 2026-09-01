@@ -13,9 +13,9 @@ from app.security import get_current_user
 from app.routers.finance import (
     is_credit_card_purchase,
     normalize_text,
+    parse_transaction_date,
     transaction_amount_abs,
 )
-from app.routers.monthly_breakdown import _credit_card_cycle_month
 
 
 router = APIRouter(
@@ -50,14 +50,15 @@ def get_monthly_totals(
             if not is_credit_card_purchase(transaction):
                 continue
 
+            transaction_date = parse_transaction_date(transaction)
+            if transaction_date is None:
+                continue
+
             amount = transaction_amount_abs(transaction)
             if amount <= 0:
                 continue
 
-            key = _credit_card_cycle_month(transaction)
-            if key is None:
-                continue
-
+            key = f"{transaction_date.year}-{transaction_date.month:02d}"
             card_by_month[key] = card_by_month.get(key, 0.0) + amount
 
     rows = (
@@ -77,7 +78,5 @@ def get_monthly_totals(
             for key, value in card_by_month.items()
         },
         "manual_commitments_by_month": manual_by_month,
-        # Compatibilidade temporária com versões do Flutter que ainda
-        # leem pix_sent_by_month para o segundo compromisso mensal.
         "pix_sent_by_month": manual_by_month,
     }
