@@ -4,6 +4,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.cash_flow import build_monthly_cash_flow
 from app.database import get_db
 from app.models import FinancialSnapshot, User
 from app.security import get_current_user
@@ -88,21 +89,6 @@ def _previous_month(value: datetime) -> tuple[int, int]:
 
 
 def _credit_card_cycle_month(transaction: dict) -> str | None:
-    """Classifica a compra pelo ciclo fixo de fechamento no dia 5.
-
-    Uma fatura YYYY-MM contém transações em:
-    dia 5 de YYYY-MM (inclusive) até dia 5 do mês seguinte (exclusivo).
-
-    Exemplos:
-    - 04/08/2026 -> ciclo 2026-07
-    - 05/08/2026 -> ciclo 2026-08
-    - 04/09/2026 -> ciclo 2026-08
-    - 05/09/2026 -> ciclo 2026-09
-
-    A classificação usa a data real da transação e ignora dueDate,
-    billDate e billForecastDate, pois esses campos podem representar
-    vencimento/fatura e deslocar compras antigas para outro mês.
-    """
     transaction_date = parse_transaction_date(transaction)
     if transaction_date is None:
         return None
@@ -159,7 +145,7 @@ def _extract_installment(transaction: dict) -> dict:
 
 
 def build_pix_breakdown(accounts: list, month: str) -> list[dict]:
-    """Retorna todos os PIX do mês-calendário, entradas e saídas."""
+    """Retorna os PIX brutos do mês para auditoria visual."""
     items: list[dict] = []
 
     for account in accounts:
@@ -312,9 +298,15 @@ def get_monthly_breakdown(
 
     payload = deepcopy(snapshot.payload or {}) if snapshot else {}
     accounts = payload.get("accounts") or []
+    investments = payload.get("investments") or []
 
     pix_items = build_pix_breakdown(accounts, month)
     card_items = build_credit_card_breakdown(accounts, month)
+    cash_flow = build_monthly_cash_flow(
+        accounts,
+        investments,
+        month,
+    )
 
     pix_sent_total = round(
         sum(
@@ -332,17 +324,6 @@ def get_monthly_breakdown(
         ),
         2,
     )
-    pix_net = round(
-        pix_received_total - pix_sent_total,
-        2,
-    )
-
-    pix_sent_count = sum(
-        1 for item in pix_items if item.get("direction") == "OUT"
-    )
-    pix_received_count = sum(
-        1 for item in pix_items if item.get("direction") == "IN"
-    )
 
     card_total = round(
         sum(float(item["amount"]) for item in card_items),
@@ -358,18 +339,15 @@ def get_monthly_breakdown(
             "items": card_items,
         },
         "pix": {
-            # Mantido para compatibilidade com o app atual.
             "total": pix_sent_total,
             "sent_total": pix_sent_total,
             "received_total": pix_received_total,
-            "net": pix_net,
+            "net": round(pix_received_total - pix_sent_total, 2),
             "count": len(pix_items),
-            "sent_count": pix_sent_count,
-            "received_count": pix_received_count,
             "items": pix_items,
         },
-        # O comprometimento continua considerando apenas saídas PIX.
-        "total_committed": round(card_total + pix_sent_total, 2),
+        "cash_flow": cash_flow,
+        "available_impact": round(cash_flow["net"] - card_total, 2),
         "updated_at": (
             snapshot.updated_at.isoformat()
             if snapshot and snapshot.updated_at
