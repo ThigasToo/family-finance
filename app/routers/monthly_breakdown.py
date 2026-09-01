@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.cash_flow import build_monthly_cash_flow
 from app.database import get_db
+from app.investment_snapshot import ensure_investment_transactions
 from app.models import FinancialSnapshot, User
 from app.security import get_current_user
 from app.routers.finance import (
@@ -145,7 +146,6 @@ def _extract_installment(transaction: dict) -> dict:
 
 
 def build_pix_breakdown(accounts: list, month: str) -> list[dict]:
-    """Retorna os PIX brutos do mês para auditoria visual."""
     items: list[dict] = []
 
     for account in accounts:
@@ -279,7 +279,7 @@ def build_credit_card_breakdown(
 
 
 @router.get("/monthly-breakdown")
-def get_monthly_breakdown(
+async def get_monthly_breakdown(
     month: str = Query(
         ...,
         description="Competência no formato YYYY-MM",
@@ -300,7 +300,13 @@ def get_monthly_breakdown(
     accounts = payload.get("accounts") or []
     investments = payload.get("investments") or []
 
-    pix_items = build_pix_breakdown(accounts, month)
+    changed = await ensure_investment_transactions(investments)
+    if changed and snapshot is not None:
+        payload["investments"] = investments
+        snapshot.payload = payload
+        db.commit()
+
+    raw_pix_items = build_pix_breakdown(accounts, month)
     card_items = build_credit_card_breakdown(accounts, month)
     cash_flow = build_monthly_cash_flow(
         accounts,
@@ -308,20 +314,29 @@ def get_monthly_breakdown(
         month,
     )
 
-    pix_sent_total = round(
+    raw_pix_sent_total = round(
         sum(
             float(item["amount"])
-            for item in pix_items
+            for item in raw_pix_items
             if item.get("direction") == "OUT"
         ),
         2,
     )
-    pix_received_total = round(
+    raw_pix_received_total = round(
         sum(
             float(item["amount"])
-            for item in pix_items
+            for item in raw_pix_items
             if item.get("direction") == "IN"
         ),
+        2,
+    )
+
+    cash_received = round(
+        cash_flow["external_in"] + cash_flow["investment_redemptions"],
+        2,
+    )
+    cash_sent = round(
+        cash_flow["external_out"] + cash_flow["investment_applications"],
         2,
     )
 
@@ -338,13 +353,22 @@ def get_monthly_breakdown(
             "billing_cycle_day": BILLING_CYCLE_DAY,
             "items": card_items,
         },
+        # Mantemos a chave pix para compatibilidade com a tela atual,
+        # mas agora ela representa o fluxo de caixa classificado.
         "pix": {
-            "total": pix_sent_total,
-            "sent_total": pix_sent_total,
-            "received_total": pix_received_total,
-            "net": round(pix_received_total - pix_sent_total, 2),
-            "count": len(pix_items),
-            "items": pix_items,
+            "total": cash_sent,
+            "sent_total": cash_sent,
+            "received_total": cash_received,
+            "net": cash_flow["net"],
+            "count": cash_flow["count"],
+            "items": cash_flow["items"],
+        },
+        "raw_pix": {
+            "sent_total": raw_pix_sent_total,
+            "received_total": raw_pix_received_total,
+            "net": round(raw_pix_received_total - raw_pix_sent_total, 2),
+            "count": len(raw_pix_items),
+            "items": raw_pix_items,
         },
         "cash_flow": cash_flow,
         "available_impact": round(cash_flow["net"] - card_total, 2),
