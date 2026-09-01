@@ -253,12 +253,28 @@ def is_outflow_transaction(
         return False
 
 
+def is_same_person_transfer(
+    transaction: dict,
+) -> bool:
+    """Identifica transferências entre contas do próprio titular."""
+
+    category = normalize_text(transaction.get("category"))
+    if category in {
+        "SAME PERSON TRANSFER",
+        "SAME_PERSON_TRANSFER",
+    }:
+        return True
+
+    return False
+
+
 def is_pix_sent(
     transaction: dict,
 ) -> bool:
     return (
         is_pix_transaction(transaction)
         and is_outflow_transaction(transaction)
+        and not is_same_person_transfer(transaction)
     )
 
 
@@ -521,7 +537,6 @@ def get_summary(
     payload.setdefault("accounts", [])
     payload.setdefault("investments", [])
 
-    # Esconde posições Pluggy encerradas inclusive em snapshots antigos.
     payload["investments"] = [
         investment
         for investment in payload["investments"]
@@ -649,7 +664,6 @@ async def refresh_finance(
             if account_type in ("BANK", "CREDIT"):
                 try:
                     if account_type == "CREDIT":
-                        # Cartões podem trazer parcelas futuras.
                         transactions = await fetch_transactions(
                             account["id"],
                             date_from=now - timedelta(days=365),
@@ -673,8 +687,6 @@ async def refresh_finance(
                         f"{account.get('id')}: {exc}"
                     )
 
-                    # Não transforma uma falha temporária da Pluggy
-                    # em uma conta aparentemente sem movimentações.
                     previous_account = previous_accounts_by_id.get(
                         account.get("id"),
                         {},
@@ -689,7 +701,6 @@ async def refresh_finance(
 
         investments = await fetch_investments(item.item_id)
 
-        # Produtos históricos/encerrados com saldo zero não entram no app.
         investments = [
             investment
             for investment in investments
