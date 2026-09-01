@@ -229,7 +229,6 @@ async def fetch_transactions(
         "accountId": account_id,
         "dateFrom": date_from.date().isoformat(),
         "dateTo": date_to.date().isoformat(),
-        "pageSize": 500,
     }
 
     all_transactions: list[dict] = []
