@@ -3,10 +3,12 @@ from copy import deepcopy
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.cash_flow import build_cash_flow_by_month
 from app.database import get_db
-from app.investment_snapshot import ensure_investment_transactions
-from app.models import FinancialSnapshot, User
+from app.models import (
+    FinancialSnapshot,
+    MonthlyManualCommitment,
+    User,
+)
 from app.security import get_current_user
 from app.routers.finance import (
     is_credit_card_purchase,
@@ -23,7 +25,7 @@ router = APIRouter(
 
 
 @router.get("/monthly-totals")
-async def get_monthly_totals(
+def get_monthly_totals(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -35,13 +37,6 @@ async def get_monthly_totals(
 
     payload = deepcopy(snapshot.payload or {}) if snapshot else {}
     accounts = payload.get("accounts") or []
-    investments = payload.get("investments") or []
-
-    changed = await ensure_investment_transactions(investments)
-    if changed and snapshot is not None:
-        payload["investments"] = investments
-        snapshot.payload = payload
-        db.commit()
 
     card_by_month: dict[str, float] = {}
 
@@ -65,17 +60,15 @@ async def get_monthly_totals(
 
             card_by_month[key] = card_by_month.get(key, 0.0) + amount
 
-    cash_flow_by_month = build_cash_flow_by_month(
-        accounts,
-        investments,
+    rows = (
+        db.query(MonthlyManualCommitment)
+        .filter(MonthlyManualCommitment.user_id == current_user.id)
+        .all()
     )
 
-    # Compatibilidade com a Home atual: ela subtrai pix_sent_by_month.
-    # Usando o inverso do fluxo líquido, a fórmula passa a ser:
-    # esperado - cartões - (-fluxo líquido) = esperado + fluxo líquido - cartões.
-    legacy_commitment_map = {
-        key: round(-value, 2)
-        for key, value in cash_flow_by_month.items()
+    manual_by_month = {
+        row.month: round(float(row.amount), 2)
+        for row in rows
     }
 
     return {
@@ -83,6 +76,8 @@ async def get_monthly_totals(
             key: round(value, 2)
             for key, value in card_by_month.items()
         },
-        "cash_flow_net_by_month": cash_flow_by_month,
-        "pix_sent_by_month": legacy_commitment_map,
+        "manual_commitments_by_month": manual_by_month,
+        # Compatibilidade temporária com versões do Flutter que ainda
+        # leem pix_sent_by_month para o segundo compromisso mensal.
+        "pix_sent_by_month": manual_by_month,
     }
