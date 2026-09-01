@@ -14,6 +14,7 @@ from app.routers import (
     monthly_totals,
     investment_transactions,
     manual_commitments,
+    card_periods,
 )
 
 
@@ -37,6 +38,7 @@ app.include_router(monthly_breakdown.router)
 app.include_router(monthly_totals.router)
 app.include_router(investment_transactions.router)
 app.include_router(manual_commitments.router)
+app.include_router(card_periods.router)
 
 
 @app.get("/health")
