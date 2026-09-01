@@ -1,3 +1,5 @@
+import asyncio
+
 from app.investment_transactions_client import fetch_investment_transactions
 
 
@@ -6,9 +8,11 @@ async def ensure_investment_transactions(
 ) -> bool:
     """Preenche transactions dos investimentos quando ainda não foram salvos.
 
+    Faz as consultas em paralelo com concorrência limitada para evitar
+    uma primeira carga lenta quando o usuário possui muitos investimentos.
     Retorna True quando o payload foi alterado.
     """
-    changed = False
+    pending: list[dict] = []
 
     for investment in investments:
         if not isinstance(investment, dict):
@@ -19,14 +23,23 @@ async def ensure_investment_transactions(
             continue
         if str(investment_id).startswith("manual-"):
             continue
-
         if "transactions" in investment:
             continue
 
+        pending.append(investment)
+
+    if not pending:
+        return False
+
+    semaphore = asyncio.Semaphore(8)
+
+    async def hydrate(investment: dict) -> None:
+        investment_id = str(investment["id"])
         try:
-            investment["transactions"] = (
-                await fetch_investment_transactions(str(investment_id))
-            )
+            async with semaphore:
+                investment["transactions"] = (
+                    await fetch_investment_transactions(investment_id)
+                )
         except Exception as exc:
             print(
                 "Erro ao preencher movimentações do investimento "
@@ -34,6 +47,5 @@ async def ensure_investment_transactions(
             )
             investment["transactions"] = []
 
-        changed = True
-
-    return changed
+    await asyncio.gather(*(hydrate(investment) for investment in pending))
+    return True
