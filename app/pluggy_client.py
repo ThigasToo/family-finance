@@ -133,7 +133,24 @@ async def fetch_accounts(
         )
 
         response.raise_for_status()
-        return response.json()["results"]
+        accounts = response.json()["results"]
+
+    print("\n========== PLUGGY ACCOUNTS ==========")
+    print(f"ITEM ID: {item_id}")
+    print(f"CONTAS RETORNADAS: {len(accounts)}")
+
+    for account in accounts:
+        print("---------- CONTA ENCONTRADA ----------")
+        print(f"ID: {account.get('id')}")
+        print(f"NOME: {account.get('name')}")
+        print(f"MARKETING NAME: {account.get('marketingName')}")
+        print(f"TIPO: {account.get('type')}")
+        print(f"SUBTIPO: {account.get('subtype')}")
+        print("--------------------------------------")
+
+    print("======================================\n")
+
+    return accounts
 
 
 # =========================================================
@@ -218,9 +235,16 @@ async def fetch_transactions(
     all_transactions: list[dict] = []
     after: str | None = None
     seen_cursors: set[str] = set()
+    page_number = 0
+
+    print("\n========== PLUGGY TRANSACTIONS ==========")
+    print(f"ACCOUNT ID: {account_id}")
+    print(f"DATE FROM: {params['dateFrom']}")
+    print(f"DATE TO: {params['dateTo']}")
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
+            page_number += 1
             current_params = dict(params)
 
             if after:
@@ -232,11 +256,38 @@ async def fetch_transactions(
                 params=current_params,
             )
 
+            print(f"PÁGINA: {page_number}")
+            print(f"STATUS: {response.status_code}")
+            print(f"URL: {response.request.url}")
+
             response.raise_for_status()
             data = response.json()
 
             results = data.get("results") or []
             all_transactions.extend(results)
+
+            print(f"RESULTADOS NESTA PÁGINA: {len(results)}")
+            print(f"NEXT: {data.get('next')}")
+
+            if results:
+                first = results[0]
+                print("PRIMEIRA TRANSAÇÃO (RESUMO):")
+                print(
+                    {
+                        "id": first.get("id"),
+                        "description": first.get("description"),
+                        "descriptionRaw": first.get("descriptionRaw"),
+                        "amount": first.get("amount"),
+                        "date": first.get("date"),
+                        "type": first.get("type"),
+                        "category": first.get("category"),
+                        "creditCardMetadata": first.get(
+                            "creditCardMetadata"
+                        ),
+                    }
+                )
+            else:
+                print("NENHUMA TRANSAÇÃO RETORNADA NESTA PÁGINA")
 
             next_after = _extract_after_cursor(
                 data.get("next")
@@ -247,10 +298,17 @@ async def fetch_transactions(
 
             # Proteção contra loop em resposta inconsistente.
             if next_after in seen_cursors:
+                print(
+                    "CURSOR REPETIDO; PAGINAÇÃO INTERROMPIDA: "
+                    f"{next_after}"
+                )
                 break
 
             seen_cursors.add(next_after)
             after = next_after
+
+    print(f"TOTAL DE TRANSAÇÕES: {len(all_transactions)}")
+    print("=========================================\n")
 
     return all_transactions
 
