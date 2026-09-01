@@ -21,6 +21,7 @@ from app.routers import (
     monthly_breakdown,
     monthly_totals,
     investment_transactions,
+    manual_commitments,
 )
 
 
@@ -89,6 +90,10 @@ app.include_router(
 
 app.include_router(
     investment_transactions.router
+)
+
+app.include_router(
+    manual_commitments.router
 )
 
 
