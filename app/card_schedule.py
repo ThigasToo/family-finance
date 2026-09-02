@@ -198,6 +198,7 @@ def build_card_schedule(accounts: list) -> list[dict]:
             item.update(
                 {
                     "id": f"projected:{latest.get('card_id')}:{future_number}:{key[1]}",
+                    "description": f"{latest.get('description') or 'Lançamento'} • PROJETADO",
                     "date": datetime.combine(projected_date, datetime.min.time()).isoformat(),
                     "installment_number": future_number,
                     "projected": True,
