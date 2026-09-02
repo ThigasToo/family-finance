@@ -1,8 +1,10 @@
 from copy import deepcopy
+from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.card_schedule import build_card_schedule, filter_card_schedule
 from app.database import get_db
 from app.models import (
     FinancialSnapshot,
@@ -11,50 +13,24 @@ from app.models import (
     User,
 )
 from app.security import get_current_user
-from app.routers.finance import (
-    is_credit_card_purchase,
-    normalize_text,
-    parse_transaction_date,
-    transaction_amount_abs,
-)
 
 
 router = APIRouter(prefix="/finance", tags=["finance"])
 
 
-def _card_transactions(accounts: list) -> list[tuple]:
-    transactions: list[tuple] = []
-
-    for account in accounts:
-        if normalize_text(account.get("type")) != "CREDIT":
-            continue
-
-        for transaction in account.get("transactions") or []:
-            if not isinstance(transaction, dict):
-                continue
-            if not is_credit_card_purchase(transaction):
-                continue
-
-            transaction_date = parse_transaction_date(transaction)
-            if transaction_date is None:
-                continue
-
-            amount = transaction_amount_abs(transaction)
-            if amount <= 0:
-                continue
-
-            transactions.append((transaction_date.date(), amount))
-
-    return transactions
+def _item_date(item: dict):
+    raw = item.get("date")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
-def _sum_period(transactions: list[tuple], date_from, date_to) -> float:
+def _sum_items(items: list[dict]) -> float:
     return round(
-        sum(
-            amount
-            for transaction_date, amount in transactions
-            if date_from <= transaction_date <= date_to
-        ),
+        sum(float(item.get("amount") or 0) for item in items),
         2,
     )
 
@@ -72,12 +48,15 @@ def get_monthly_totals(
 
     payload = deepcopy(snapshot.payload or {}) if snapshot else {}
     accounts = payload.get("accounts") or []
-    transactions = _card_transactions(accounts)
+    schedule = build_card_schedule(accounts)
 
     card_by_month: dict[str, float] = {}
-    for transaction_date, amount in transactions:
-        key = f"{transaction_date.year}-{transaction_date.month:02d}"
-        card_by_month[key] = card_by_month.get(key, 0.0) + amount
+    for item in schedule:
+        item_date = _item_date(item)
+        if item_date is None:
+            continue
+        key = f"{item_date.year}-{item_date.month:02d}"
+        card_by_month[key] = card_by_month.get(key, 0.0) + float(item.get("amount") or 0)
 
     period_rows = (
         db.query(MonthlyCardPeriod)
@@ -87,11 +66,8 @@ def get_monthly_totals(
 
     card_periods_by_month = {}
     for row in period_rows:
-        card_by_month[row.month] = _sum_period(
-            transactions,
-            row.date_from,
-            row.date_to,
-        )
+        filtered = filter_card_schedule(accounts, row.date_from, row.date_to)
+        card_by_month[row.month] = _sum_items(filtered)
         card_periods_by_month[row.month] = {
             "date_from": row.date_from.isoformat(),
             "date_to": row.date_to.isoformat(),

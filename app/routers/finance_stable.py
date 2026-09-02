@@ -4,9 +4,15 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.card_schedule import next_due_summary
 from app.database import get_db
 from app.models import FinancialSnapshot, PluggyItem, User
-from app.pluggy_client import fetch_accounts, fetch_investments, fetch_transactions
+from app.pluggy_client import (
+    fetch_accounts,
+    fetch_bills,
+    fetch_investments,
+    fetch_transactions,
+)
 from app.schemas import FinanceRefreshOut, FinanceSummaryOut
 from app.security import get_current_user
 from app.routers.finance import (
@@ -53,7 +59,6 @@ def _belongs_to_item(record: dict, item: PluggyItem) -> bool:
         if raw_item:
             return str(raw_item) == str(item.item_id)
 
-    # Compatibilidade final com snapshots antigos que não guardavam itemId.
     expected = normalize_institution_name(item.institution_name)
     actual = _record_institution(record)
     return bool(expected and actual and expected == actual)
@@ -73,6 +78,31 @@ def _previous_account_by_id(records: list) -> dict[str, dict]:
         for record in records
         if isinstance(record, dict) and record.get("id")
     }
+
+
+def _apply_next_due_to_credit_data(account: dict) -> None:
+    next_due = account.get("next_due") or {}
+    if not isinstance(next_due, dict):
+        return
+
+    credit_data = account.get("creditData") or {}
+    if not isinstance(credit_data, dict):
+        credit_data = {}
+    else:
+        credit_data = deepcopy(credit_data)
+
+    due_date = next_due.get("due_date")
+    if due_date:
+        credit_data["balanceDueDate"] = due_date
+
+    if next_due.get("source") == "bill":
+        minimum = next_due.get("minimum_payment")
+        if minimum is not None:
+            credit_data["minimumPayment"] = minimum
+
+    credit_data["balanceDueDateSource"] = next_due.get("source")
+    credit_data["balanceDueDateEstimated"] = bool(next_due.get("estimated"))
+    account["creditData"] = credit_data
 
 
 async def _load_accounts_for_item(
@@ -111,6 +141,8 @@ async def _load_accounts_for_item(
             prepared.append(account)
             continue
 
+        previous = previous_by_id.get(str(account.get("id")), {})
+
         try:
             if account_type == "CREDIT":
                 transactions = await fetch_transactions(
@@ -132,10 +164,16 @@ async def _load_accounts_for_item(
             ]
         except Exception:
             transactions_complete = False
-            previous = previous_by_id.get(str(account.get("id")), {})
-            account["transactions"] = deepcopy(
-                previous.get("transactions") or []
-            )
+            account["transactions"] = deepcopy(previous.get("transactions") or [])
+
+        if account_type == "CREDIT":
+            try:
+                account["bills"] = await fetch_bills(str(account["id"]))
+            except Exception:
+                account["bills"] = deepcopy(previous.get("bills") or [])
+
+            account["next_due"] = next_due_summary(account)
+            _apply_next_due_to_credit_data(account)
 
         prepared.append(account)
 
@@ -146,10 +184,7 @@ async def _load_investments_for_item(
     item: PluggyItem,
     previous_investments: list,
 ) -> tuple[list[dict], bool]:
-    previous_item_investments = _previous_for_item(
-        previous_investments,
-        item,
-    )
+    previous_item_investments = _previous_for_item(previous_investments, item)
 
     try:
         raw_investments = await fetch_investments(item.item_id)
@@ -199,8 +234,6 @@ async def sync_pluggy_item_snapshot(
     user_id: int,
     item: PluggyItem,
 ) -> dict:
-    """Sincroniza somente o item recém-conectado, sem aplicar cooldown."""
-
     snapshot = (
         db.query(FinancialSnapshot)
         .filter(FinancialSnapshot.user_id == user_id)
@@ -211,11 +244,7 @@ async def sync_pluggy_item_snapshot(
     previous_investments = previous_payload.get("investments") or []
     now = datetime.now(timezone.utc)
 
-    accounts, investments, complete = await _load_item_data(
-        item,
-        previous_payload,
-        now,
-    )
+    accounts, investments, complete = await _load_item_data(item, previous_payload, now)
 
     kept_accounts = [
         deepcopy(record)
