@@ -1,8 +1,7 @@
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database import get_db
 from app.models import PluggyItem, User
 from app.pluggy_client import create_connect_token, fetch_item
@@ -19,15 +18,6 @@ class ConnectTokenOut(BaseModel):
 
 class RegisterItemIn(BaseModel):
     item_id: str
-
-
-class PluggyWebhookIn(BaseModel):
-    event: str
-    eventId: str | None = None
-    itemId: str | None = None
-    accountId: str | None = None
-    transactionIds: list[str] | None = None
-    clientUserId: str | None = None
 
 
 @router.post("/connect-token", response_model=ConnectTokenOut)
@@ -97,60 +87,4 @@ async def register_item(
         ),
         "accounts_synced": sync_result["accounts"],
         "investments_synced": sync_result["investments"],
-    }
-
-
-@router.post("/webhook")
-async def receive_pluggy_webhook(
-    payload: PluggyWebhookIn,
-    x_family_finance_webhook_secret: str | None = Header(default=None),
-    db: Session = Depends(get_db),
-):
-    """Atualiza o snapshot quando a Pluggy informa mudanças relevantes.
-
-    O endpoint fica desabilitado até `PLUGGY_WEBHOOK_SECRET` ser configurado
-    no ambiente e o mesmo valor ser enviado pela Pluggy como header customizado.
-    """
-    expected_secret = settings.pluggy_webhook_secret.strip()
-    if not expected_secret:
-        raise HTTPException(
-            status_code=503,
-            detail="Webhook Pluggy ainda não configurado",
-        )
-
-    if x_family_finance_webhook_secret != expected_secret:
-        raise HTTPException(status_code=401, detail="Webhook não autorizado")
-
-    event = payload.event.strip().lower()
-    relevant_events = {
-        "item/created",
-        "item/updated",
-        "transactions/created",
-        "transactions/updated",
-        "transactions/deleted",
-    }
-    if event not in relevant_events:
-        return {"status": "ignored", "event": payload.event}
-
-    if not payload.itemId:
-        return {"status": "ignored", "reason": "missing itemId"}
-
-    item = (
-        db.query(PluggyItem)
-        .filter(PluggyItem.item_id == payload.itemId)
-        .first()
-    )
-    if item is None:
-        return {"status": "ignored", "reason": "unknown item"}
-
-    sync_result = await sync_pluggy_item_snapshot(
-        db,
-        item.user_id,
-        item,
-    )
-
-    return {
-        "status": "ok",
-        "event": payload.event,
-        "sync_status": "ok" if sync_result["complete"] else "partial",
     }

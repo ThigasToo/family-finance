@@ -36,12 +36,15 @@ async def get_pluggy_api_key() -> str:
         data = response.json()
 
     _cached_api_key = data["apiKey"]
-    _cached_api_key_expires_at = datetime.now(timezone.utc) + timedelta(minutes=100)
+    _cached_api_key_expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=100
+    )
     return _cached_api_key
 
 
 async def create_connect_token(client_user_id: str) -> str:
     api_key = await get_pluggy_api_key()
+
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.post(
             f"{PLUGGY_BASE_URL}/connect_token",
@@ -54,6 +57,7 @@ async def create_connect_token(client_user_id: str) -> str:
 
 async def fetch_item(item_id: str) -> dict:
     api_key = await get_pluggy_api_key()
+
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/items/{item_id}",
@@ -65,6 +69,7 @@ async def fetch_item(item_id: str) -> dict:
 
 async def fetch_accounts(item_id: str) -> list[dict]:
     api_key = await get_pluggy_api_key()
+
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/accounts",
@@ -75,41 +80,31 @@ async def fetch_accounts(item_id: str) -> list[dict]:
         return response.json().get("results") or []
 
 
-async def fetch_bills(account_id: str) -> list[dict]:
-    """Busca faturas reais disponíveis para um cartão de crédito."""
-    api_key = await get_pluggy_api_key()
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        response = await client.get(
-            f"{PLUGGY_BASE_URL}/bills",
-            headers={"X-API-KEY": api_key},
-            params={"accountId": account_id},
-        )
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        return [item for item in (data.get("results") or []) if isinstance(item, dict)]
-
-
 def _extract_after_cursor(next_value) -> str | None:
     if not next_value:
         return None
+
     if isinstance(next_value, dict):
         after = next_value.get("after")
         return str(after) if after else None
+
     value = str(next_value).strip()
     if not value:
         return None
+
     if "after=" in value:
         parsed = urlparse(value)
         values = parse_qs(parsed.query).get("after")
         if values:
             return values[0]
+
         values = parse_qs(value.lstrip("?")).get("after")
         if values:
             return values[0]
+
     if "?" not in value and "=" not in value:
         return value
+
     return None
 
 
@@ -120,10 +115,12 @@ async def fetch_transactions(
 ) -> list[dict]:
     api_key = await get_pluggy_api_key()
     now = datetime.now(timezone.utc)
+
     if date_to is None:
         date_to = now
     if date_from is None:
         date_from = date_to - timedelta(days=365)
+
     if date_from.tzinfo is None:
         date_from = date_from.replace(tzinfo=timezone.utc)
     if date_to.tzinfo is None:
@@ -134,6 +131,7 @@ async def fetch_transactions(
         "dateFrom": date_from.date().isoformat(),
         "dateTo": date_to.date().isoformat(),
     }
+
     all_transactions: list[dict] = []
     after: str | None = None
     seen_cursors: set[str] = set()
@@ -143,6 +141,7 @@ async def fetch_transactions(
             current_params = dict(params)
             if after:
                 current_params["after"] = after
+
             response = await client.get(
                 f"{PLUGGY_BASE_URL}/v2/transactions",
                 headers={"X-API-KEY": api_key},
@@ -150,20 +149,27 @@ async def fetch_transactions(
             )
             response.raise_for_status()
             data = response.json()
+
             results = data.get("results") or []
             all_transactions.extend(
-                transaction for transaction in results if isinstance(transaction, dict)
+                transaction
+                for transaction in results
+                if isinstance(transaction, dict)
             )
+
             next_after = _extract_after_cursor(data.get("next"))
             if not next_after or next_after in seen_cursors:
                 break
+
             seen_cursors.add(next_after)
             after = next_after
+
     return all_transactions
 
 
 async def fetch_investments(item_id: str) -> list[dict]:
     api_key = await get_pluggy_api_key()
+
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.get(
             f"{PLUGGY_BASE_URL}/investments",
