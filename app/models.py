@@ -38,6 +38,11 @@ class User(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    monthly_snapshots = relationship(
+        "MonthlyFinancialSnapshot",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
     manual_investments = relationship(
         "ManualInvestment",
         back_populates="owner",
@@ -75,6 +80,37 @@ class FinancialSnapshot(Base):
         default=lambda: datetime.now(timezone.utc),
     )
     owner = relationship("User", back_populates="snapshot")
+
+
+class MonthlyFinancialSnapshot(Base):
+    """Resposta mensal pré-calculada derivada do snapshot financeiro."""
+
+    __tablename__ = "monthly_financial_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "month",
+            name="uq_monthly_financial_snapshot_user_month",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+    month = Column(String(7), nullable=False, index=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    source_updated_at = Column(DateTime, nullable=True)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    owner = relationship("User", back_populates="monthly_snapshots")
 
 
 class MonthlyManualCommitment(Base):
