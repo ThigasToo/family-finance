@@ -54,6 +54,7 @@ def _belongs_to_item(record: dict, item: PluggyItem) -> bool:
         if raw_item:
             return str(raw_item) == str(item.item_id)
 
+    # Compatibilidade final com snapshots antigos que não guardavam itemId.
     expected = normalize_institution_name(item.institution_name)
     actual = _record_institution(record)
     return bool(expected and actual and expected == actual)
