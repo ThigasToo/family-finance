@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.cash_flow import build_monthly_cash_flow
 from app.database import get_db
 from app.investment_snapshot import ensure_investment_transactions
-from app.models import FinancialSnapshot, User
+from app.models import FinancialSnapshot, MonthlyFinancialSnapshot, User
 from app.security import get_current_user
 from app.routers.finance import (
     is_credit_card_purchase,
@@ -305,46 +305,15 @@ def build_credit_card_breakdown(
     return items
 
 
-@router.get("/monthly-breakdown")
-async def get_monthly_breakdown(
-    month: str = Query(
-        ...,
-        description="Mês de referência no formato YYYY-MM",
-        examples=["2026-09"],
-    ),
-    date_from: str | None = Query(
-        None,
-        description="Data inicial opcional dos cartões no formato YYYY-MM-DD",
-    ),
-    date_to: str | None = Query(
-        None,
-        description="Data final opcional dos cartões no formato YYYY-MM-DD",
-    ),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    month = _validate_month(month)
-    card_date_from, card_date_to = _resolve_card_date_range(
-        month,
-        date_from,
-        date_to,
-    )
-
-    snapshot = (
-        db.query(FinancialSnapshot)
-        .filter(FinancialSnapshot.user_id == current_user.id)
-        .first()
-    )
-
-    payload = deepcopy(snapshot.payload or {}) if snapshot else {}
-    accounts = payload.get("accounts") or []
-    investments = payload.get("investments") or []
-
-    changed = await ensure_investment_transactions(investments)
-    if changed and snapshot is not None:
-        payload["investments"] = investments
-        snapshot.payload = payload
-        db.commit()
+def build_monthly_breakdown_payload(
+    accounts: list,
+    investments: list,
+    month: str,
+    card_date_from: date,
+    card_date_to: date,
+    source_updated_at: datetime | None = None,
+) -> dict:
+    """Monta a resposta mensal usando as mesmas regras atuais do endpoint."""
 
     raw_pix_items = build_pix_breakdown(accounts, month)
     card_items = build_credit_card_breakdown(
@@ -416,8 +385,111 @@ async def get_monthly_breakdown(
         "cash_flow": cash_flow,
         "available_impact": round(cash_flow["net"] - card_total, 2),
         "updated_at": (
-            snapshot.updated_at.isoformat()
-            if snapshot and snapshot.updated_at
+            source_updated_at.isoformat()
+            if source_updated_at
             else None
         ),
     }
+
+
+def persist_monthly_financial_snapshot(
+    db: Session,
+    user_id: int,
+    month: str,
+    payload: dict,
+    source_updated_at: datetime | None,
+) -> bool:
+    """Salva o snapshot mensal sem impedir a resposta em caso de falha."""
+
+    try:
+        monthly_snapshot = (
+            db.query(MonthlyFinancialSnapshot)
+            .filter(
+                MonthlyFinancialSnapshot.user_id == user_id,
+                MonthlyFinancialSnapshot.month == month,
+            )
+            .first()
+        )
+
+        if monthly_snapshot is None:
+            monthly_snapshot = MonthlyFinancialSnapshot(
+                user_id=user_id,
+                month=month,
+                payload=deepcopy(payload),
+                source_updated_at=source_updated_at,
+            )
+            db.add(monthly_snapshot)
+        else:
+            monthly_snapshot.payload = deepcopy(payload)
+            monthly_snapshot.source_updated_at = source_updated_at
+
+        db.commit()
+        return True
+    except Exception as exc:
+        db.rollback()
+        print(
+            "Erro ao persistir snapshot financeiro mensal "
+            f"do usuário {user_id} em {month}: {exc}"
+        )
+        return False
+
+
+@router.get("/monthly-breakdown")
+async def get_monthly_breakdown(
+    month: str = Query(
+        ...,
+        description="Mês de referência no formato YYYY-MM",
+        examples=["2026-09"],
+    ),
+    date_from: str | None = Query(
+        None,
+        description="Data inicial opcional dos cartões no formato YYYY-MM-DD",
+    ),
+    date_to: str | None = Query(
+        None,
+        description="Data final opcional dos cartões no formato YYYY-MM-DD",
+    ),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    month = _validate_month(month)
+    card_date_from, card_date_to = _resolve_card_date_range(
+        month,
+        date_from,
+        date_to,
+    )
+
+    snapshot = (
+        db.query(FinancialSnapshot)
+        .filter(FinancialSnapshot.user_id == current_user.id)
+        .first()
+    )
+
+    payload = deepcopy(snapshot.payload or {}) if snapshot else {}
+    accounts = payload.get("accounts") or []
+    investments = payload.get("investments") or []
+
+    changed = await ensure_investment_transactions(investments)
+    if changed and snapshot is not None:
+        payload["investments"] = investments
+        snapshot.payload = payload
+        db.commit()
+
+    response_payload = build_monthly_breakdown_payload(
+        accounts=accounts,
+        investments=investments,
+        month=month,
+        card_date_from=card_date_from,
+        card_date_to=card_date_to,
+        source_updated_at=(snapshot.updated_at if snapshot else None),
+    )
+
+    persist_monthly_financial_snapshot(
+        db=db,
+        user_id=current_user.id,
+        month=month,
+        payload=response_payload,
+        source_updated_at=(snapshot.updated_at if snapshot else None),
+    )
+
+    return response_payload
