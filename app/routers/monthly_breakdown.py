@@ -1,6 +1,6 @@
 from calendar import monthrange
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -434,6 +434,81 @@ def persist_monthly_financial_snapshot(
         return False
 
 
+def _normalized_timestamp(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _monthly_snapshot_matches_source(
+    monthly_snapshot: MonthlyFinancialSnapshot,
+    financial_snapshot: FinancialSnapshot | None,
+) -> bool:
+    monthly_source = _normalized_timestamp(monthly_snapshot.source_updated_at)
+    financial_source = _normalized_timestamp(
+        financial_snapshot.updated_at if financial_snapshot else None
+    )
+    return monthly_source == financial_source
+
+
+def _monthly_snapshot_matches_card_period(
+    payload: dict,
+    card_date_from: date,
+    card_date_to: date,
+) -> bool:
+    credit_cards = payload.get("credit_cards")
+    if not isinstance(credit_cards, dict):
+        return False
+
+    return (
+        credit_cards.get("date_from") == card_date_from.isoformat()
+        and credit_cards.get("date_to") == card_date_to.isoformat()
+    )
+
+
+def get_valid_monthly_snapshot_payload(
+    db: Session,
+    user_id: int,
+    month: str,
+    financial_snapshot: FinancialSnapshot | None,
+    card_date_from: date,
+    card_date_to: date,
+) -> dict | None:
+    """Retorna o snapshot somente quando fonte e período ainda são válidos."""
+
+    monthly_snapshot = (
+        db.query(MonthlyFinancialSnapshot)
+        .filter(
+            MonthlyFinancialSnapshot.user_id == user_id,
+            MonthlyFinancialSnapshot.month == month,
+        )
+        .first()
+    )
+    if monthly_snapshot is None:
+        return None
+
+    payload = monthly_snapshot.payload or {}
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("month") != month:
+        return None
+    if not _monthly_snapshot_matches_source(
+        monthly_snapshot,
+        financial_snapshot,
+    ):
+        return None
+    if not _monthly_snapshot_matches_card_period(
+        payload,
+        card_date_from,
+        card_date_to,
+    ):
+        return None
+
+    return deepcopy(payload)
+
+
 @router.get("/monthly-breakdown")
 async def get_monthly_breakdown(
     month: str = Query(
@@ -464,6 +539,17 @@ async def get_monthly_breakdown(
         .filter(FinancialSnapshot.user_id == current_user.id)
         .first()
     )
+
+    cached_payload = get_valid_monthly_snapshot_payload(
+        db=db,
+        user_id=current_user.id,
+        month=month,
+        financial_snapshot=snapshot,
+        card_date_from=card_date_from,
+        card_date_to=card_date_to,
+    )
+    if cached_payload is not None:
+        return cached_payload
 
     payload = deepcopy(snapshot.payload or {}) if snapshot else {}
     accounts = payload.get("accounts") or []
