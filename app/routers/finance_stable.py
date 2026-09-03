@@ -75,6 +75,14 @@ def _previous_account_by_id(records: list) -> dict[str, dict]:
     }
 
 
+def _previous_investment_by_id(records: list) -> dict[str, dict]:
+    return {
+        str(record.get("id")): record
+        for record in records
+        if isinstance(record, dict) and record.get("id")
+    }
+
+
 async def _load_accounts_for_item(
     item: PluggyItem,
     previous_accounts: list,
@@ -150,6 +158,7 @@ async def _load_investments_for_item(
         previous_investments,
         item,
     )
+    previous_by_id = _previous_investment_by_id(previous_investments)
 
     try:
         raw_investments = await fetch_investments(item.item_id)
@@ -172,6 +181,13 @@ async def _load_investments_for_item(
         investment["resolved_institution"] = institution_name
         investment["source"] = "PLUGGY"
         investment[_ITEM_KEY] = item.item_id
+
+        previous = previous_by_id.get(str(investment.get("id")), {})
+        if "transactions" in previous:
+            investment["transactions"] = deepcopy(
+                previous.get("transactions") or []
+            )
+
         prepared.append(investment)
 
     return prepared, True
