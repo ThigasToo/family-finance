@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import FinancialSnapshot, PluggyItem, User
+from app.monthly_snapshot_cache import invalidate_all_monthly_snapshots
 from app.pluggy_client import fetch_accounts, fetch_investments, fetch_transactions
 from app.schemas import FinanceRefreshOut, FinanceSummaryOut
 from app.security import get_current_user
@@ -344,6 +345,7 @@ async def refresh_finance(
         snapshot.payload = payload
         snapshot.updated_at = now if complete else retryable_time
 
+    invalidate_all_monthly_snapshots(db, current_user.id)
     db.commit()
 
     return FinanceRefreshOut(status="ok", updated_at=now)
