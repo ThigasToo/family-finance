@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import MonthlyManualCommitment, User
+from app.monthly_snapshot_cache import invalidate_monthly_snapshot
 from app.security import get_current_user
 
 
@@ -83,6 +84,7 @@ def save_manual_commitment(
     else:
         row.amount = data.amount
 
+    invalidate_monthly_snapshot(db, current_user.id, month)
     db.commit()
     db.refresh(row)
 
