@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import MonthlyCardPeriod, User
+from app.monthly_snapshot_cache import invalidate_monthly_snapshot
 from app.security import get_current_user
 
 
@@ -108,6 +109,7 @@ def save_card_period(
         row.date_from = payload.date_from
         row.date_to = payload.date_to
 
+    invalidate_monthly_snapshot(db, current_user.id, month)
     db.commit()
     db.refresh(row)
     return _response(month, row)
@@ -130,5 +132,6 @@ def reset_card_period(
     )
     if row is not None:
         db.delete(row)
-        db.commit()
+    invalidate_monthly_snapshot(db, current_user.id, month)
+    db.commit()
     return _response(month, None)
