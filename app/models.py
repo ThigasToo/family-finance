@@ -172,6 +172,35 @@ class MonthlyCardPeriod(Base):
     )
 
 
+class MonthlyManualCardEntry(Base):
+    """Ajuste manual para dívida de cartão não identificada automaticamente."""
+
+    __tablename__ = "monthly_manual_card_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+    month = Column(String(7), nullable=False, index=True)
+    description = Column(String, nullable=False)
+    institution = Column(String, nullable=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class ManualInvestment(Base):
     __tablename__ = "manual_investments"
 

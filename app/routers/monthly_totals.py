@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models import (
     FinancialSnapshot,
     MonthlyCardPeriod,
+    MonthlyManualCardEntry,
     MonthlyManualCommitment,
     User,
 )
@@ -97,6 +98,20 @@ def get_monthly_totals(
             "date_to": row.date_to.isoformat(),
         }
 
+    manual_card_rows = (
+        db.query(MonthlyManualCardEntry)
+        .filter(MonthlyManualCardEntry.user_id == current_user.id)
+        .all()
+    )
+    manual_card_by_month: dict[str, float] = {}
+    for row in manual_card_rows:
+        manual_card_by_month[row.month] = (
+            manual_card_by_month.get(row.month, 0.0) + float(row.amount)
+        )
+
+    for month, amount in manual_card_by_month.items():
+        card_by_month[month] = card_by_month.get(month, 0.0) + amount
+
     manual_rows = (
         db.query(MonthlyManualCommitment)
         .filter(MonthlyManualCommitment.user_id == current_user.id)
@@ -112,6 +127,10 @@ def get_monthly_totals(
         "credit_card_commitments_by_month": {
             key: round(value, 2)
             for key, value in card_by_month.items()
+        },
+        "manual_card_commitments_by_month": {
+            key: round(value, 2)
+            for key, value in manual_card_by_month.items()
         },
         "card_periods_by_month": card_periods_by_month,
         "manual_commitments_by_month": manual_by_month,
